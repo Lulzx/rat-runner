@@ -4,11 +4,21 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 import {
   EffectComposer, RenderPass, EffectPass,
-  SMAAEffect, BloomEffect, ToneMappingEffect, ToneMappingMode,
+  BloomEffect, ToneMappingEffect, ToneMappingMode,
   BrightnessContrastEffect, HueSaturationEffect, VignetteEffect,
   Effect,
 } from 'postprocessing';
 import { N8AOPostPass } from 'n8ao';
+
+// Primary-coarse-pointer devices (phones/tablets) get touch controls, gyro
+// look, and a lower DPR cap. Touchscreen laptops keep the desktop scheme,
+// though the touch handlers below work there too.
+const isTouch = matchMedia('(pointer: coarse)').matches;
+
+// ?quality=low|high overrides; mobile defaults to low (2x MSAA, no SSAO,
+// smaller shadow map) — the visual gap is small at phone screen sizes
+const urlParams = new URLSearchParams(location.search);
+const lowQ = (urlParams.get('quality') || (isTouch ? 'low' : 'high')) === 'low';
 
 // ---------- Scene basics ----------
 const scene = new THREE.Scene();
@@ -19,34 +29,47 @@ scene.fog = new THREE.Fog(0x6c7d95, 30, 90);
 // close-ups clip through the fur shells and expose the hollow body
 const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.02, 200);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+// antialias:false — all rendering goes through the composer's offscreen MSAA
+// buffers, so canvas-level AA would only burn memory on the final blit
+const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
 renderer.setSize(innerWidth, innerHeight);
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+// render resolution is the single biggest GPU cost — ?dpr=1.5 (or 1) trades
+// a little fur crispness for a large frame-time win on retina displays
+const dprCap = parseFloat(urlParams.get('dpr') || (isTouch ? '1.5' : '2'));
+renderer.setPixelRatio(Math.min(devicePixelRatio, dprCap));
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type = lowQ ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
 // Tone mapping happens in the post stack's final pass, in full float precision
 renderer.toneMapping = THREE.NoToneMapping;
 document.body.appendChild(renderer.domElement);
 
-// Post-processing: HDR pipeline with 8x MSAA (keeps fur alpha-to-coverage alive),
-// N8AO ground-truth ambient occlusion, subtle bloom, SMAA, ACES tone mapping.
+// Post-processing: HDR pipeline with 4x MSAA (keeps fur alpha-to-coverage alive;
+// 8x costs roughly double the bandwidth for no visible gain), N8AO ambient
+// occlusion at half resolution, subtle bloom, ACES tone mapping.
 const composer = new EffectComposer(renderer, {
   frameBufferType: THREE.HalfFloatType,
-  multisampling: 8,
+  multisampling: lowQ ? 2 : 4,
 });
 composer.addPass(new RenderPass(scene, camera));
-const aoPass = new N8AOPostPass(scene, camera, innerWidth, innerHeight);
-aoPass.configuration.aoRadius = 0.12;       // scene is rat-scale (~0.6 units)
-aoPass.configuration.distanceFalloff = 0.4;
-// Keep AO gentle: layered fur shells occlude each other, so strong AO
-// crushes the whole rat to black (Sketchfab applies no SSAO to the model).
-aoPass.configuration.intensity = 1.0;
-aoPass.setQualityMode('Ultra');
-composer.addPass(aoPass);
+// AO is already subtle here — on the low tier it's the first thing to cut
+if (!lowQ) {
+  const aoPass = new N8AOPostPass(scene, camera, innerWidth, innerHeight);
+  aoPass.configuration.aoRadius = 0.12;       // scene is rat-scale (~0.6 units)
+  aoPass.configuration.distanceFalloff = 0.4;
+  // Keep AO gentle: layered fur shells occlude each other, so strong AO
+  // crushes the whole rat to black (Sketchfab applies no SSAO to the model).
+  aoPass.configuration.intensity = 1.0;
+  // AO is deliberately subtle here, so half-res + Medium is indistinguishable
+  // from full-res Ultra but a fraction of the cost
+  aoPass.configuration.halfRes = true;
+  aoPass.setQualityMode('Medium');
+  composer.addPass(aoPass);
+}
 composer.addPass(new EffectPass(
   camera,
   new BloomEffect({ intensity: 0.35, luminanceThreshold: 0.8, mipmapBlur: true }),
-  new SMAAEffect(),
+  // no SMAA: 4x MSAA already handles geometric edges, and the fur uses
+  // alpha-to-coverage which SMAA can't improve — it only added blur + cost
   new ToneMappingEffect({ mode: ToneMappingMode.ACES_FILMIC }),
 ));
 
@@ -108,7 +131,7 @@ scene.add(hemi);
 const sun = new THREE.DirectionalLight(0xfff2dd, 1.1);
 sun.position.set(8, 14, 6);
 sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.mapSize.set(lowQ ? 1024 : 2048, lowQ ? 1024 : 2048);
 sun.shadow.camera.left = -25; sun.shadow.camera.right = 25;
 sun.shadow.camera.top = 25; sun.shadow.camera.bottom = -25;
 // 50-unit shadow frustum vs a 0.6-unit rat: without bias the fur
@@ -173,7 +196,8 @@ loader.load(
     box.setFromObject(model);
     model.position.y -= box.min.y;
 
-    const maxAniso = renderer.capabilities.getMaxAnisotropy();
+    // 16x anisotropy is a real bandwidth cost on mobile GPUs; 4x is plenty there
+    const maxAniso = Math.min(renderer.capabilities.getMaxAnisotropy(), lowQ ? 4 : 16);
     model.traverse((o) => {
       if (o.isMesh) {
         o.castShadow = true;
@@ -397,7 +421,14 @@ const pressed = (...codes) => codes.some((c) => keys.has(c));
 let yaw = 0;      // horizontal orbit angle
 let pitch = 0.22; // vertical angle
 const overlay = document.getElementById('overlay');
-overlay.addEventListener('click', () => renderer.domElement.requestPointerLock());
+overlay.addEventListener('click', () => {
+  if (isTouch) {
+    overlay.classList.add('hidden');
+    enableGyro(); // must run inside the tap gesture for the iOS permission prompt
+  } else {
+    renderer.domElement.requestPointerLock();
+  }
+});
 document.addEventListener('pointerlockchange', () => {
   overlay.classList.toggle('hidden', document.pointerLockElement === renderer.domElement);
 });
@@ -407,6 +438,185 @@ addEventListener('mousemove', (e) => {
   pitch += e.movementY * 0.0025;
   pitch = Math.max(0.05, Math.min(1.2, pitch));
 });
+
+// ---------- Mobile: gyroscope look ----------
+// Device orientation drives a yaw/pitch offset on top of the touch-drag
+// angles, calibrated to the phone's pose when gyro is enabled — so enabling
+// it never snaps the camera, and dragging still works to re-aim.
+const gyroBtn = document.getElementById('gyroBtn');
+let gyroEnabled = false;
+let gyroListening = false;
+let gyroYaw = 0, gyroPitch = 0;
+let gyroYaw0 = null, gyroPitch0 = 0;
+
+const _gEuler = new THREE.Euler();
+const _gQuat = new THREE.Quaternion();
+const _gScreen = new THREE.Quaternion();
+const _gFwd = new THREE.Vector3();
+// -90° about X: maps the device frame (screen faces up) to the camera frame
+// (looking out the back of the phone) — same math as DeviceOrientationControls
+const GYRO_Q1 = new THREE.Quaternion(-Math.SQRT1_2, 0, 0, Math.SQRT1_2);
+const GYRO_Z = new THREE.Vector3(0, 0, 1);
+
+function onDeviceOrientation(e) {
+  if (!gyroEnabled || e.alpha === null) return;
+  const orient = THREE.MathUtils.degToRad(screen.orientation?.angle ?? window.orientation ?? 0);
+  _gEuler.set(
+    THREE.MathUtils.degToRad(e.beta),
+    THREE.MathUtils.degToRad(e.alpha),
+    -THREE.MathUtils.degToRad(e.gamma),
+    'YXZ'
+  );
+  _gQuat.setFromEuler(_gEuler)
+    .multiply(GYRO_Q1)
+    .multiply(_gScreen.setFromAxisAngle(GYRO_Z, -orient));
+  _gFwd.set(0, 0, -1).applyQuaternion(_gQuat);
+  const devYaw = Math.atan2(-_gFwd.x, -_gFwd.z);
+  const devPitch = -Math.asin(THREE.MathUtils.clamp(_gFwd.y, -1, 1));
+  if (gyroYaw0 === null) { gyroYaw0 = devYaw; gyroPitch0 = devPitch; }
+  gyroYaw = devYaw - gyroYaw0;
+  gyroPitch = devPitch - gyroPitch0;
+}
+
+async function enableGyro() {
+  if (!isTouch) return;
+  try {
+    // iOS 13+ gates orientation events behind an explicit permission prompt
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      if (await DeviceOrientationEvent.requestPermission() !== 'granted') return setGyroUI();
+    }
+    if (!gyroListening) {
+      addEventListener('deviceorientation', onDeviceOrientation);
+      gyroListening = true;
+    }
+    gyroYaw0 = null; gyroYaw = 0; gyroPitch = 0; // recalibrate to current pose
+    gyroEnabled = true;
+  } catch { gyroEnabled = false; }
+  setGyroUI();
+}
+
+function setGyroUI() {
+  gyroBtn.textContent = gyroEnabled ? 'Gyro on' : 'Gyro off';
+  gyroBtn.classList.toggle('on', gyroEnabled);
+}
+
+if (isTouch) {
+  gyroBtn.style.display = 'block';
+  gyroBtn.addEventListener('click', () => {
+    if (gyroEnabled) {
+      // fold the gyro offset into the touch angles so the view doesn't snap
+      yaw += gyroYaw;
+      pitch = THREE.MathUtils.clamp(pitch + gyroPitch, 0.05, 1.2);
+      gyroYaw = gyroPitch = 0;
+      gyroEnabled = false;
+      setGyroUI();
+    } else {
+      enableGyro();
+    }
+  });
+
+  overlay.textContent = 'Tap to play';
+  const hud = document.getElementById('hud');
+  hud.innerHTML = '<b>Left thumb</b> move (push to rim to run) &nbsp;·&nbsp; <b>Right thumb</b> look &nbsp;·&nbsp; <b>Pinch</b> zoom';
+  hud.appendChild(statusEl);
+}
+
+// ---------- Mobile: touch joystick, look drag, pinch zoom ----------
+const stickEl = document.getElementById('stick');
+const nubEl = document.getElementById('nub');
+const JOY_R = 60;
+let joyTouch = null, lookTouch = null, pinchTouch = null;
+let joyOrigin = { x: 0, y: 0 };
+const joyVec = { x: 0, y: 0 };
+let joyRun = false;
+let lookLast = { x: 0, y: 0 };
+let pinchLast = 0;
+
+const findTouch = (list, id) => {
+  for (const t of list) if (t.identifier === id) return t;
+  return null;
+};
+const pinchSpan = (touches) => {
+  const a = findTouch(touches, lookTouch), b = findTouch(touches, pinchTouch);
+  return a && b ? Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) : 0;
+};
+function moveNub(x, y) {
+  nubEl.style.left = `${x - 26}px`;
+  nubEl.style.top = `${y - 26}px`;
+}
+
+const canvas = renderer.domElement;
+canvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (joyTouch === null && t.clientX < innerWidth * 0.45) {
+      // joystick spawns wherever the left thumb lands
+      joyTouch = t.identifier;
+      joyOrigin = { x: t.clientX, y: t.clientY };
+      joyVec.x = joyVec.y = 0;
+      joyRun = false;
+      stickEl.style.display = nubEl.style.display = 'block';
+      stickEl.style.left = `${t.clientX - JOY_R}px`;
+      stickEl.style.top = `${t.clientY - JOY_R}px`;
+      moveNub(t.clientX, t.clientY);
+    } else if (lookTouch === null) {
+      lookTouch = t.identifier;
+      lookLast = { x: t.clientX, y: t.clientY };
+    } else if (pinchTouch === null) {
+      pinchTouch = t.identifier;
+      pinchLast = pinchSpan(e.touches);
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.identifier === joyTouch) {
+      let dx = t.clientX - joyOrigin.x, dy = t.clientY - joyOrigin.y;
+      const len = Math.hypot(dx, dy);
+      joyRun = len > JOY_R * 0.95; // pushed to the rim = run
+      if (len > JOY_R) { dx *= JOY_R / len; dy *= JOY_R / len; }
+      joyVec.x = dx / JOY_R;
+      joyVec.y = dy / JOY_R;
+      moveNub(joyOrigin.x + dx, joyOrigin.y + dy);
+    } else if (t.identifier === lookTouch && pinchTouch === null) {
+      yaw -= (t.clientX - lookLast.x) * 0.005;
+      pitch = THREE.MathUtils.clamp(pitch + (t.clientY - lookLast.y) * 0.005, 0.05, 1.2);
+      lookLast = { x: t.clientX, y: t.clientY };
+    }
+  }
+  if (pinchTouch !== null) {
+    const d = pinchSpan(e.touches);
+    if (d && pinchLast) camDist = THREE.MathUtils.clamp(camDist * (pinchLast / d), CAM_MIN, CAM_MAX);
+    if (d) pinchLast = d;
+  }
+}, { passive: false });
+
+const endTouch = (e) => {
+  for (const t of e.changedTouches) {
+    if (t.identifier === joyTouch) {
+      joyTouch = null;
+      joyVec.x = joyVec.y = 0;
+      joyRun = false;
+      stickEl.style.display = nubEl.style.display = 'none';
+    } else if (t.identifier === lookTouch) {
+      lookTouch = null;
+      if (pinchTouch !== null) {
+        // promote the remaining pinch finger to the look finger
+        lookTouch = pinchTouch;
+        pinchTouch = null;
+        const p = findTouch(e.touches, lookTouch);
+        if (p) lookLast = { x: p.clientX, y: p.clientY };
+      }
+    } else if (t.identifier === pinchTouch) {
+      pinchTouch = null;
+    }
+  }
+};
+canvas.addEventListener('touchend', endTouch);
+canvas.addEventListener('touchcancel', endTouch);
 
 // ---------- Movement ----------
 const WALK_SPEED = 2.2;
@@ -422,11 +632,50 @@ addEventListener('wheel', (e) => {
 }, { passive: true });
 const camTarget = new THREE.Vector3();
 
+// scratch vectors reused every frame so the loop allocates nothing
+const _forward = new THREE.Vector3();
+const _right = new THREE.Vector3();
+const _dir = new THREE.Vector3();
+const _target = new THREE.Vector3();
+const _zero = new THREE.Vector3();
+
 const clock = new THREE.Clock();
+
+// ---------- Adaptive resolution ----------
+// Render resolution dominates GPU cost, so when frame times slip we shed
+// pixels instead of stuttering, and claw them back when there's headroom.
+// Disable with ?fixedres to compare quality settings at full resolution.
+const adaptiveRes = !urlParams.has('fixedres');
+let renderScale = 1;
+let frameAvg = 1 / 60;
+let lastScaleChange = 0;
+
+function applyRenderSize() {
+  renderer.setPixelRatio(Math.min(devicePixelRatio, dprCap) * renderScale);
+  renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+}
+
+function adaptResolution(rawDt, now) {
+  if (!adaptiveRes || rawDt > 0.25) return; // ignore tab-switch spikes
+  frameAvg += (rawDt - frameAvg) * 0.05;    // ~1s exponential average
+  if (now - lastScaleChange < 1) return;    // let the average settle between steps
+  if (frameAvg > 1 / 40 && renderScale > 0.55) {
+    renderScale = Math.max(0.55, renderScale - 0.15);
+  } else if (frameAvg < 1 / 65 && renderScale < 1) {
+    renderScale = Math.min(1, renderScale + 0.1);
+  } else {
+    return;
+  }
+  lastScaleChange = now;
+  applyRenderSize();
+}
 
 function animate() {
   requestAnimationFrame(animate);
-  const dt = Math.min(clock.getDelta(), 0.05);
+  const rawDt = clock.getDelta();
+  const dt = Math.min(rawDt, 0.05);
+  adaptResolution(rawDt, clock.elapsedTime);
 
   // Input direction (camera-relative)
   let ix = 0, iz = 0;
@@ -434,30 +683,38 @@ function animate() {
   if (pressed('KeyS', 'ArrowDown')) iz -= 1;
   if (pressed('KeyA', 'ArrowLeft')) ix += 1;
   if (pressed('KeyD', 'ArrowRight')) ix -= 1;
+  if (joyTouch !== null && Math.hypot(joyVec.x, joyVec.y) > 0.2) {
+    ix = -joyVec.x;
+    iz = -joyVec.y;
+  }
 
   const moving = ix !== 0 || iz !== 0;
-  const running = moving && pressed('ShiftLeft', 'ShiftRight');
+  const running = moving && (pressed('ShiftLeft', 'ShiftRight') || joyRun);
   const speed = running ? RUN_SPEED : WALK_SPEED;
+
+  // effective camera angles: touch/mouse steering plus the gyro offset
+  const camYaw = yaw + gyroYaw;
+  const camPitch = THREE.MathUtils.clamp(pitch + gyroPitch, 0.05, 1.2);
 
   if (moving) {
     // Build world-space direction from camera yaw
-    const forward = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
-    const right = new THREE.Vector3(-forward.z, 0, forward.x);
-    const dir = new THREE.Vector3()
-      .addScaledVector(forward, iz)
-      .addScaledVector(right, -ix)
+    _forward.set(-Math.sin(camYaw), 0, -Math.cos(camYaw));
+    _right.set(-_forward.z, 0, _forward.x);
+    _dir.set(0, 0, 0)
+      .addScaledVector(_forward, iz)
+      .addScaledVector(_right, -ix)
       .normalize();
 
-    velocity.lerp(dir.clone().multiplyScalar(speed), 1 - Math.exp(-10 * dt));
+    velocity.lerp(_target.copy(_dir).multiplyScalar(speed), 1 - Math.exp(-10 * dt));
 
     // Smoothly face movement direction
-    const targetHeading = Math.atan2(dir.x, dir.z);
+    const targetHeading = Math.atan2(_dir.x, _dir.z);
     let diff = targetHeading - playerHeading;
     diff = Math.atan2(Math.sin(diff), Math.cos(diff));
     playerHeading += diff * Math.min(1, TURN_LERP * dt);
     player.rotation.y = playerHeading;
   } else {
-    velocity.lerp(new THREE.Vector3(), 1 - Math.exp(-12 * dt));
+    velocity.lerp(_zero, 1 - Math.exp(-12 * dt));
   }
 
   player.position.addScaledVector(velocity, dt);
@@ -472,13 +729,14 @@ function animate() {
   }
 
   // Third-person camera orbit
-  camTarget.copy(player.position).add(new THREE.Vector3(0, 0.15, 0));
-  const camOffset = new THREE.Vector3(
-    Math.sin(yaw) * Math.cos(pitch),
-    Math.sin(pitch),
-    Math.cos(yaw) * Math.cos(pitch)
+  camTarget.copy(player.position);
+  camTarget.y += 0.15;
+  _target.set(
+    Math.sin(camYaw) * Math.cos(camPitch),
+    Math.sin(camPitch),
+    Math.cos(camYaw) * Math.cos(camPitch)
   ).multiplyScalar(camDist);
-  camera.position.copy(camTarget).add(camOffset);
+  camera.position.copy(camTarget).add(_target);
   if (camera.position.y < 0.15) camera.position.y = 0.15;
   camera.lookAt(camTarget);
 
@@ -489,6 +747,5 @@ animate();
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth, innerHeight);
-  composer.setSize(innerWidth, innerHeight);
+  applyRenderSize();
 });

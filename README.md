@@ -4,6 +4,16 @@ Third-person rat sandbox built on three.js, using the CC-BY ["Black Rat (Free do
 
 Run any static server in this directory (e.g. `python3 -m http.server`) and open the page. WASD/arrows to move, Shift to run, mouse to look, scroll to zoom, V for wireframe.
 
+## Mobile
+
+Touch devices get their own control scheme: the left half of the screen is a floating **virtual joystick** (push to the rim to run), the right half is **drag to look**, and a second finger **pinches to zoom**. The **Gyro** button (top right) enables gyroscope camera control — tilting/turning the phone aims the camera, calibrated to the phone's pose when enabled so the view never snaps; drag still works on top of it. On iOS the tap-to-play gesture triggers the required motion-permission prompt.
+
+## Performance
+
+- **Quality tiers**: mobile defaults to `low` (2× MSAA, no SSAO, 1024px shadows, 4× anisotropy, DPR cap 1.5); desktop to `high`. Override with `?quality=low|high`.
+- **Adaptive resolution**: frame times are tracked with a ~1 s moving average; below ~40 fps the render scale steps down (to a 0.55 floor), and it steps back up when there's headroom. Disable with `?fixedres` for A/B comparisons.
+- `?dpr=1` still force-caps the pixel ratio directly.
+
 ## Making the Sketchfab model look right in three.js
 
 Getting the rat to match Sketchfab's render took several non-obvious fixes. Documented here so the debugging doesn't have to be repeated.
@@ -37,8 +47,8 @@ Plain `alphaTest` with the exported 0.68 cutoff erodes strand tips into stubble.
 
 The difference between Sketchfab's *No Post-Processing* and *Final Render* views is a post stack, reproduced here with `postprocessing`:
 
-- HDR pipeline (`HalfFloatType` buffers, 8× MSAA — required for alpha-to-coverage fur), tone mapping deferred to the end in float precision (`renderer.toneMapping = NoToneMapping`).
-- Bloom (subtle, threshold 0.8) → SMAA → **ACES filmic** tone mapping.
+- HDR pipeline (`HalfFloatType` buffers, 4× MSAA — required for alpha-to-coverage fur; 2× on the low tier), tone mapping deferred to the end in float precision (`renderer.toneMapping = NoToneMapping`).
+- Bloom (subtle, threshold 0.8) → **ACES filmic** tone mapping (no SMAA — MSAA already covers geometric edges, and it can't help alpha-to-coverage fur).
 - Then a grade pass: **unsharp-mask sharpen** (this is what makes fur strands read crisp), brightness/contrast lift, saturation boost, soft vignette.
 
 ### Credit
