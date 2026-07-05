@@ -386,7 +386,7 @@ const velocity = new THREE.Vector3();
 let playerHeading = 0;
 
 let camDist = 0.9;
-const CAM_MIN = 0.35, CAM_MAX = 8;
+const CAM_MIN = 0.12, CAM_MAX = 30;
 addEventListener('wheel', (e) => {
   camDist = THREE.MathUtils.clamp(camDist * (1 + e.deltaY * 0.001), CAM_MIN, CAM_MAX);
 }, { passive: true });
