@@ -217,14 +217,13 @@ loader.load(
               #ifdef USE_NORMALMAP
                 vec4 strandStrip = texture2D( map, vNormalMapUv );
                 diffuseColor.a = strandStrip.a;
-                // the pelt texture has white guard hairs painted in, which read
-                // as scattered bright flecks on the strands — compress them
+                // the pelt texture has white guard hairs painted in — soften
+                // them so they read as grizzled gray variation, not hot flecks
                 float peltLum = dot(diffuseColor.rgb, vec3(0.299, 0.587, 0.114));
-                diffuseColor.rgb *= mix(1.0, 0.35, smoothstep(0.06, 0.3, peltLum));
-                // root-to-tip gradient: darken roots, let tips catch light.
-                // Keep the multiplier <= 1 or white strand tips blow out to
-                // frost at close range (mip 0 samples the pure-white gradient)
-                diffuseColor.rgb *= (0.5 + 0.5 * strandStrip.rgb);
+                diffuseColor.rgb *= mix(1.0, 0.6, smoothstep(0.1, 0.4, peltLum));
+                // overall gain + root-to-tip gradient: the reference render is
+                // a mid-gray grizzled coat, not black
+                diffuseColor.rgb *= 1.7 * (0.55 + 0.45 * strandStrip.rgb);
               #endif
               ${mode === 'a2c' ? `
               diffuseColor.a = clamp((diffuseColor.a - 0.45) / max(fwidth(diffuseColor.a), 0.0001) + 0.5, 0.0, 1.0);
@@ -264,7 +263,7 @@ loader.load(
               '#include <map_fragment>',
               `#include <map_fragment>
               float peltLum = dot(diffuseColor.rgb, vec3(0.299, 0.587, 0.114));
-              diffuseColor.rgb *= mix(1.0, 0.35, smoothstep(0.06, 0.3, peltLum));`
+              diffuseColor.rgb *= 1.4 * mix(1.0, 0.6, smoothstep(0.1, 0.4, peltLum));`
             );
           };
           mat.customProgramCacheKey = () => 'body-dim';
