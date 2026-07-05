@@ -1,4 +1,3 @@
-# binary assets
-*.hdr
-*.glb
-model/
+# unused source model export (32MB, site loads model/scene.gltf instead)
+rat.glb
+.DS_Store
