@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rat Runner</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #111; }
+    canvas { display: block; }
+    #hud {
+      position: fixed; top: 12px; left: 12px; color: #ddd;
+      font: 13px/1.5 system-ui, sans-serif;
+      background: rgba(0,0,0,.45); padding: 10px 14px; border-radius: 8px;
+      pointer-events: none; user-select: none;
+    }
+    #hud b { color: #fff; }
+    #overlay {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      color: #fff; font: 16px system-ui, sans-serif; background: rgba(0,0,0,.55);
+      cursor: pointer;
+    }
+    #overlay.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <b>WASD / Arrows</b> move &nbsp;·&nbsp; <b>Shift</b> run &nbsp;·&nbsp; <b>Mouse</b> look &nbsp;·&nbsp; <b>Scroll</b> zoom &nbsp;·&nbsp; <b>V</b> wireframe
+    <div id="status" style="opacity:.7"></div>
+  </div>
+  <div id="overlay">Click to play (locks mouse for camera control)</div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.166.1/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.166.1/examples/jsm/",
+      "three/examples/jsm/": "https://cdn.jsdelivr.net/npm/three@0.166.1/examples/jsm/",
+      "postprocessing": "https://cdn.jsdelivr.net/npm/postprocessing@6.36.4/build/index.js",
+      "n8ao": "https://cdn.jsdelivr.net/npm/n8ao@1.9.4/dist/N8AO.js"
+    }
+  }
+  </script>
+  <script type="module" src="main.js"></script>
+</body>
+</html>
