@@ -57,24 +57,29 @@ class SharpenEffect extends Effect {
     super('SharpenEffect', /* glsl */`
       uniform float strength;
       void mainImage(const in vec4 inputColor, const in vec2 uv, out vec4 outputColor) {
-        vec3 blur =
-          texture2D(inputBuffer, uv + vec2(texelSize.x, 0.0)).rgb +
-          texture2D(inputBuffer, uv - vec2(texelSize.x, 0.0)).rgb +
-          texture2D(inputBuffer, uv + vec2(0.0, texelSize.y)).rgb +
-          texture2D(inputBuffer, uv - vec2(0.0, texelSize.y)).rgb;
-        vec3 sharp = inputColor.rgb + (inputColor.rgb - blur * 0.25) * strength;
-        outputColor = vec4(max(sharp, 0.0), inputColor.a);
+        vec3 n0 = texture2D(inputBuffer, uv + vec2(texelSize.x, 0.0)).rgb;
+        vec3 n1 = texture2D(inputBuffer, uv - vec2(texelSize.x, 0.0)).rgb;
+        vec3 n2 = texture2D(inputBuffer, uv + vec2(0.0, texelSize.y)).rgb;
+        vec3 n3 = texture2D(inputBuffer, uv - vec2(0.0, texelSize.y)).rgb;
+        vec3 sharp = inputColor.rgb + (inputColor.rgb - (n0 + n1 + n2 + n3) * 0.25) * strength;
+        // anti-ringing: clamp to the local neighborhood so overshoot can't
+        // create bright halos (reads as white flecks on dark fur strands)
+        vec3 lo = min(inputColor.rgb, min(min(n0, n1), min(n2, n3)));
+        vec3 hi = max(inputColor.rgb, max(max(n0, n1), max(n2, n3)));
+        outputColor = vec4(clamp(sharp, lo, hi), inputColor.a);
       }`,
       { uniforms: new Map([['strength', new THREE.Uniform(strength)]]) });
   }
 }
-composer.addPass(new EffectPass(
-  camera,
-  new SharpenEffect(0.45),
-  new BrightnessContrastEffect({ brightness: 0.02, contrast: 0.15 }),
-  new HueSaturationEffect({ saturation: 0.2 }),
-  new VignetteEffect({ offset: 0.25, darkness: 0.55 }),
-));
+if (!new URLSearchParams(location.search).has('nopost')) {
+  composer.addPass(new EffectPass(
+    camera,
+    new SharpenEffect(0.2),
+    new BrightnessContrastEffect({ brightness: 0.02, contrast: 0.15 }),
+    new HueSaturationEffect({ saturation: 0.2 }),
+    new VignetteEffect({ offset: 0.25, darkness: 0.55 }),
+  ));
+}
 
 // Image-based environment lighting (what makes PBR materials pop on Sketchfab).
 // Synthetic room env as instant fallback, replaced by the outdoor HDRI once loaded.
@@ -187,9 +192,10 @@ loader.load(
         // The fur uses alpha-MASK with a harsh 0.68 cutoff, which chops the
         // strand textures into solid clumps. Try ?fur=blend|hash|mask&cutoff=0.3
         if (mat && mat.alphaTest > 0) {
-          // the specularf0 strip is near-white, which reads as frosty sheen on
-          // every strand up close — tame it
-          if ('specularIntensity' in mat) mat.specularIntensity = 0.5;
+          // the specularf0 strip is near-white, which reads as silvery glints
+          // on every strand — kill specular on the fur entirely
+          if ('specularIntensity' in mat) mat.specularIntensity = 0;
+          mat.roughness = 1;
           const params = new URLSearchParams(location.search);
           const mode = params.get('fur') || 'a2c';
           const cutoff = parseFloat(params.get('cutoff') || '0.3');
@@ -211,6 +217,10 @@ loader.load(
               #ifdef USE_NORMALMAP
                 vec4 strandStrip = texture2D( map, vNormalMapUv );
                 diffuseColor.a = strandStrip.a;
+                // the pelt texture has white guard hairs painted in, which read
+                // as scattered bright flecks on the strands — compress them
+                float peltLum = dot(diffuseColor.rgb, vec3(0.299, 0.587, 0.114));
+                diffuseColor.rgb *= mix(1.0, 0.35, smoothstep(0.06, 0.3, peltLum));
                 // root-to-tip gradient: darken roots, let tips catch light.
                 // Keep the multiplier <= 1 or white strand tips blow out to
                 // frost at close range (mip 0 samples the pure-white gradient)
@@ -244,6 +254,20 @@ loader.load(
           } else {
             mat.alphaTest = cutoff;
           }
+          mat.needsUpdate = true;
+        } else if (mat?.name === 'blackrat_body') {
+          // the body skin under the fur shells has the same painted-in white
+          // guard hairs; where it peeks through strand gaps they read as
+          // bright flecks — compress them the same way as the fur
+          mat.onBeforeCompile = (shader) => {
+            shader.fragmentShader = shader.fragmentShader.replace(
+              '#include <map_fragment>',
+              `#include <map_fragment>
+              float peltLum = dot(diffuseColor.rgb, vec3(0.299, 0.587, 0.114));
+              diffuseColor.rgb *= mix(1.0, 0.35, smoothstep(0.06, 0.3, peltLum));`
+            );
+          };
+          mat.customProgramCacheKey = () => 'body-dim';
           mat.needsUpdate = true;
         }
       }
