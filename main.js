@@ -15,7 +15,9 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x6c7d95);
 scene.fog = new THREE.Fog(0x6c7d95, 30, 90);
 
-const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 200);
+// near plane must stay well inside the minimum zoom distance or extreme
+// close-ups clip through the fur shells and expose the hollow body
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.02, 200);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(innerWidth, innerHeight);
@@ -68,7 +70,7 @@ class SharpenEffect extends Effect {
 }
 composer.addPass(new EffectPass(
   camera,
-  new SharpenEffect(0.6),
+  new SharpenEffect(0.45),
   new BrightnessContrastEffect({ brightness: 0.02, contrast: 0.15 }),
   new HueSaturationEffect({ saturation: 0.2 }),
   new VignetteEffect({ offset: 0.25, darkness: 0.55 }),
@@ -185,6 +187,9 @@ loader.load(
         // The fur uses alpha-MASK with a harsh 0.68 cutoff, which chops the
         // strand textures into solid clumps. Try ?fur=blend|hash|mask&cutoff=0.3
         if (mat && mat.alphaTest > 0) {
+          // the specularf0 strip is near-white, which reads as frosty sheen on
+          // every strand up close — tame it
+          if ('specularIntensity' in mat) mat.specularIntensity = 0.5;
           const params = new URLSearchParams(location.search);
           const mode = params.get('fur') || 'a2c';
           const cutoff = parseFloat(params.get('cutoff') || '0.3');
@@ -206,8 +211,10 @@ loader.load(
               #ifdef USE_NORMALMAP
                 vec4 strandStrip = texture2D( map, vNormalMapUv );
                 diffuseColor.a = strandStrip.a;
-                // root-to-tip gradient: darken roots, let tips catch light
-                diffuseColor.rgb *= (0.6 + 0.8 * strandStrip.rgb);
+                // root-to-tip gradient: darken roots, let tips catch light.
+                // Keep the multiplier <= 1 or white strand tips blow out to
+                // frost at close range (mip 0 samples the pure-white gradient)
+                diffuseColor.rgb *= (0.5 + 0.5 * strandStrip.rgb);
               #endif
               ${mode === 'a2c' ? `
               diffuseColor.a = clamp((diffuseColor.a - 0.45) / max(fwidth(diffuseColor.a), 0.0001) + 0.5, 0.0, 1.0);
@@ -386,7 +393,7 @@ const velocity = new THREE.Vector3();
 let playerHeading = 0;
 
 let camDist = 0.9;
-const CAM_MIN = 0.12, CAM_MAX = 30;
+const CAM_MIN = 0.18, CAM_MAX = 30;
 addEventListener('wheel', (e) => {
   camDist = THREE.MathUtils.clamp(camDist * (1 + e.deltaY * 0.001), CAM_MIN, CAM_MAX);
 }, { passive: true });
