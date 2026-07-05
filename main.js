@@ -26,8 +26,9 @@ scene.background = new THREE.Color(0x6c7d95);
 scene.fog = new THREE.Fog(0x6c7d95, 30, 90);
 
 // near plane must stay well inside the minimum zoom distance or extreme
-// close-ups clip through the fur shells and expose the hollow body
-const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.02, 200);
+// close-ups clip through the fur shells and expose the hollow body;
+// far sits just past the fog end (90) so fully-fogged geometry is culled
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.02, 95);
 
 // antialias:false — all rendering goes through the composer's offscreen MSAA
 // buffers, so canvas-level AA would only burn memory on the final blit
@@ -65,14 +66,6 @@ if (!lowQ) {
   aoPass.setQualityMode('Medium');
   composer.addPass(aoPass);
 }
-composer.addPass(new EffectPass(
-  camera,
-  new BloomEffect({ intensity: 0.35, luminanceThreshold: 0.8, mipmapBlur: true }),
-  // no SMAA: 4x MSAA already handles geometric edges, and the fur uses
-  // alpha-to-coverage which SMAA can't improve — it only added blur + cost
-  new ToneMappingEffect({ mode: ToneMappingMode.ACES_FILMIC }),
-));
-
 // Sketchfab "Final Render" grade: unsharp mask (crisps up the fur strands),
 // contrast + saturation lift, and a soft vignette.
 class SharpenEffect extends Effect {
@@ -94,14 +87,29 @@ class SharpenEffect extends Effect {
       { uniforms: new Map([['strength', new THREE.Uniform(strength)]]) });
   }
 }
-if (!new URLSearchParams(location.search).has('nopost')) {
-  composer.addPass(new EffectPass(
-    camera,
-    new SharpenEffect(0.2),
-    new BrightnessContrastEffect({ brightness: 0.02, contrast: 0.15 }),
-    new HueSaturationEffect({ saturation: 0.2 }),
-    new VignetteEffect({ offset: 0.25, darkness: 0.55 }),
-  ));
+// Each EffectPass is a fullscreen pass over a HalfFloat buffer — real
+// bandwidth on mobile. Low tier merges everything into ONE pass and drops
+// the sharpen (it samples neighbors, so it can't merge with effects that
+// run before it in the same shader; at reduced render scale it mostly
+// amplified noise anyway). High keeps the two-pass stack: bloom + ACES
+// tone mapping in float precision, then sharpen + grade on the LDR result.
+// No SMAA in either tier: MSAA already handles geometric edges, and the fur
+// uses alpha-to-coverage which SMAA can't improve — it only added blur + cost.
+const nopost = urlParams.has('nopost');
+const coreFx = [
+  new BloomEffect({ intensity: 0.35, luminanceThreshold: 0.8, mipmapBlur: true }),
+  new ToneMappingEffect({ mode: ToneMappingMode.ACES_FILMIC }),
+];
+const gradeFx = nopost ? [] : [
+  new BrightnessContrastEffect({ brightness: 0.02, contrast: 0.15 }),
+  new HueSaturationEffect({ saturation: 0.2 }),
+  new VignetteEffect({ offset: 0.25, darkness: 0.55 }),
+];
+if (lowQ) {
+  composer.addPass(new EffectPass(camera, ...coreFx, ...gradeFx));
+} else {
+  composer.addPass(new EffectPass(camera, ...coreFx));
+  if (!nopost) composer.addPass(new EffectPass(camera, new SharpenEffect(0.2), ...gradeFx));
 }
 
 // Image-based environment lighting (what makes PBR materials pop on Sketchfab).
@@ -179,6 +187,7 @@ const startClips = {};    // walk -> walk_start_A, run -> run_start_A
 const endClips = {};      // walk -> walk_end_A,  run -> run_end_A
 
 const statusEl = document.getElementById('status');
+const fpsEl = document.getElementById('fps');
 const loader = new GLTFLoader();
 
 loader.load(
@@ -519,6 +528,7 @@ if (isTouch) {
   overlay.textContent = 'Tap to play';
   const hud = document.getElementById('hud');
   hud.innerHTML = '<b>Left thumb</b> move (push to rim to run) &nbsp;·&nbsp; <b>Right thumb</b> look &nbsp;·&nbsp; <b>Pinch</b> zoom';
+  hud.appendChild(fpsEl);
   hud.appendChild(statusEl);
 }
 
@@ -660,9 +670,11 @@ function adaptResolution(rawDt, now) {
   if (!adaptiveRes || rawDt > 0.25) return; // ignore tab-switch spikes
   frameAvg += (rawDt - frameAvg) * 0.05;    // ~1s exponential average
   if (now - lastScaleChange < 1) return;    // let the average settle between steps
-  if (frameAvg > 1 / 40 && renderScale > 0.55) {
+  // hysteresis band 45–55 fps: the recovery threshold must sit below the
+  // 60 fps rAF cap or a 60 Hz display could never climb back to full res
+  if (frameAvg > 1 / 45 && renderScale > 0.55) {
     renderScale = Math.max(0.55, renderScale - 0.15);
-  } else if (frameAvg < 1 / 65 && renderScale < 1) {
+  } else if (frameAvg < 1 / 55 && renderScale < 1) {
     renderScale = Math.min(1, renderScale + 0.1);
   } else {
     return;
@@ -671,11 +683,25 @@ function adaptResolution(rawDt, now) {
   applyRenderSize();
 }
 
+// FPS readout, refreshed twice a second; shows the adaptive render scale
+// whenever it's below native so dips are attributable at a glance
+let fpsFrames = 0, fpsTime = 0;
+function updateFps(rawDt) {
+  fpsFrames++;
+  fpsTime += rawDt;
+  if (fpsTime < 0.5) return;
+  const fps = Math.round(fpsFrames / fpsTime);
+  fpsEl.textContent = renderScale < 1 ? `${fps} fps · ${Math.round(renderScale * 100)}% res` : `${fps} fps`;
+  fpsFrames = 0;
+  fpsTime = 0;
+}
+
 function animate() {
   requestAnimationFrame(animate);
   const rawDt = clock.getDelta();
   const dt = Math.min(rawDt, 0.05);
   adaptResolution(rawDt, clock.elapsedTime);
+  updateFps(rawDt);
 
   // Input direction (camera-relative)
   let ix = 0, iz = 0;

@@ -11,7 +11,8 @@ Touch devices get their own control scheme: the left half of the screen is a flo
 ## Performance
 
 - **Quality tiers**: mobile defaults to `low` (2× MSAA, no SSAO, 1024px shadows, 4× anisotropy, DPR cap 1.5); desktop to `high`. Override with `?quality=low|high`.
-- **Adaptive resolution**: frame times are tracked with a ~1 s moving average; below ~40 fps the render scale steps down (to a 0.55 floor), and it steps back up when there's headroom. Disable with `?fixedres` for A/B comparisons.
+- **Adaptive resolution**: frame times are tracked with a ~1 s moving average; below ~45 fps the render scale steps down (to a 0.55 floor), climbing back above ~55 fps. Disable with `?fixedres` for A/B comparisons. The HUD shows live FPS and the current render scale.
+- On the low tier the whole post stack (bloom, ACES tone mapping, grade) merges into a single fullscreen pass, and the camera far plane sits just past the fog so fully-fogged geometry is culled.
 - `?dpr=1` still force-caps the pixel ratio directly.
 
 ## Making the Sketchfab model look right in three.js
